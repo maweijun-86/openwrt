@@ -1,0 +1,106 @@
+name: Build Light OpenWrt for IPQ5018 (512M RAM)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.config'
+  workflow_dispatch:  # 允许手动触发编译
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      TARGET: "qualcommipq50xx"
+      SUBTARGET: "ipq5018"
+      DEVICE: "generic"  # 通用设备，如需特定设备请修改
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update system and install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential ccache ecj fastjar file g++ gawk gettext git \
+          java-propose-classpath libelf-dev libncurses5-dev libncursesw5-dev libssl-dev \
+          python3 python3-distutils python3-setuptools rsync unzip wget
+
+      - name: Update feeds (仅保留官方源)
+        run: |
+          # 清理第三方源，只保留官方必要源
+          sed -i '/src-git packages/d' feeds.conf.default
+          sed -i '/src-git luci/d' feeds.conf.default
+          sed -i '/src-git routing/d' feeds.conf.default
+          sed -i '/src-git telephony/d' feeds.conf.default
+          
+          echo 'src-git packages https://github.com/openwrt/packages.git' >> feeds.conf.default
+          echo 'src-git luci https://github.com/openwrt/luci.git' >> feeds.conf.default
+          
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure minimal system (512M内存专用)
+        run: |
+          # 基础配置
+          echo "CONFIG_TARGET_${TARGET}=y" > .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y" >> .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_${DEVICE}=y" >> .config
+          
+          # 启用必要的网络功能
+          echo "CONFIG_PACKAGE_ipv6helper=y" >> .config  # IPv6支持
+          echo "CONFIG_PACKAGE_firewall=y" >> .config   # 基础防火墙
+          echo "CONFIG_PACKAGE_firewall4=y" >> .config  # nftables防火墙
+          
+          # 启用LuCI基础界面(最小化)
+          echo "CONFIG_PACKAGE_luci=y" >> .config
+          echo "CONFIG_PACKAGE_luci-base=y" >> .config
+          echo "CONFIG_PACKAGE_luci-mod-admin-full=y" >> .config  # 基础管理功能
+          echo "CONFIG_PACKAGE_luci-theme-bootstrap=y" >> .config # 轻量主题
+          
+          # IPQ5018必要驱动
+          echo "CONFIG_PACKAGE_kmod-qca-nss-dp=y" >> .config       # 网络加速驱动
+          echo "CONFIG_PACKAGE_kmod-qca-nss-ecm=y" >> .config      # 连接管理驱动
+          echo "CONFIG_PACKAGE_kmod-qca-nss-gmac=y" >> .config     # GMAC驱动
+          echo "CONFIG_PACKAGE_kmod-qca-nss-drv=y" >> .config      # 核心驱动
+          
+          # 无线必要组件
+          echo "CONFIG_PACKAGE_kmod-ath11k=y" >> .config           # WiFi 6驱动
+          echo "CONFIG_PACKAGE_ath11k-firmware-qca6390=y" >> .config # 固件支持
+          echo "CONFIG_PACKAGE_hostapd-common=y" >> .config        # 无线管理
+          echo "CONFIG_PACKAGE_wpad-basic-wolfssl=y" >> .config    # 轻量无线认证
+          
+          # 基础系统工具
+          echo "CONFIG_PACKAGE_opkg=y" >> .config                  # 包管理
+          echo "CONFIG_PACKAGE_uci=y" >> .config                   # 配置管理
+          echo "CONFIG_PACKAGE_wget=y" >> .config                  # 下载工具
+          echo "CONFIG_PACKAGE_sshd=y" >> .config                  # SSH服务
+          
+          # 禁用不必要功能
+          echo "# 禁用非必要功能" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ddns=n" >> .config         # 禁用动态DNS
+          echo "CONFIG_PACKAGE_luci-app-samba=n" >> .config        # 禁用网络共享
+          echo "CONFIG_PACKAGE_luci-app-qos=n" >> .config          # 禁用QoS
+          echo "CONFIG_PACKAGE_samba4-libs=n" >> .config           # 禁用Samba库
+          echo "CONFIG_PACKAGE_kmod-usb-storage=n" >> .config      # 禁用USB存储
+          echo "CONFIG_PACKAGE_kmod-video-core=n" >> .config       # 禁用视频驱动
+          echo "CONFIG_PACKAGE_aiccu=n" >> .config                 # 禁用IPv6隧道
+          
+          # 生成最终配置
+          make defconfig
+
+      - name: 下载依赖包
+        run: make download -j4 V=s
+
+      - name: 开始编译(优化内存使用)
+        run: |
+          # 限制并行编译数量，避免内存溢出
+          make -j2 V=s
+
+      - name: 上传编译结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-ipq5018-light-firmware
+          path: bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/
